@@ -4,6 +4,7 @@ provider "aws" {
 
 resource "aws_s3_bucket" "my_bucket" {
   bucket = var.s3_bucket_name
+  force_destroy = true  # Allows Terraform to delete non-empty bucket
 
   tags = {
     Name        = var.s3_bucket_name
@@ -39,23 +40,24 @@ resource "aws_s3_bucket_lifecycle_configuration" "my_bucket_lifecycle" {
 resource "null_resource" "empty_s3_bucket" {
   provisioner "local-exec" {
     command = <<EOT
-      aws s3 rm s3://${aws_s3_bucket.my_bucket.bucket} --recursive
-      
-      versions_json=$(aws s3api list-object-versions --bucket ${aws_s3_bucket.my_bucket.bucket} --query '{Objects: Versions[].{Key:Key,VersionId:VersionId}}' --output json | jq )
-      markers_json=$(aws s3api list-object-versions --bucket ${aws_s3_bucket.my_bucket.bucket} --query '{Objects: DeleteMarkers[].{Key:Key,VersionId:VersionId}}' --output json | jq )
-      
-      echo $versions_json > delete_versions.json
-      echo $markers_json > delete_markers.json
+      # Remove all normal objects
+      aws s3 rm s3://${aws_s3_bucket.my_bucket.bucket} --recursive || true
 
-      if [ "$(jq '.Objects | length' delete_versions.json)" -gt 0 ]; then
-        aws s3api delete-objects --bucket ${aws_s3_bucket.my_bucket.bucket} --delete file://delete_versions.json
+      # Fetch and delete all versions
+      versions_json=$(aws s3api list-object-versions --bucket ${aws_s3_bucket.my_bucket.bucket} --query '{Objects: Versions[].{Key:Key,VersionId:VersionId}}' --output json)
+      if [ "$(echo "$versions_json" | jq '.Objects | length')" -gt 0 ]; then
+        echo "$versions_json" > delete_versions.json
+        aws s3api delete-objects --bucket ${aws_s3_bucket.my_bucket.bucket} --delete file://delete_versions.json || true
+        rm -f delete_versions.json
       fi
 
-      if [ "$(jq '.Objects | length' delete_markers.json)" -gt 0 ]; then
-        aws s3api delete-objects --bucket ${aws_s3_bucket.my_bucket.bucket} --delete file://delete_markers.json
+      # Fetch and delete all delete markers
+      markers_json=$(aws s3api list-object-versions --bucket ${aws_s3_bucket.my_bucket.bucket} --query '{Objects: DeleteMarkers[].{Key:Key,VersionId:VersionId}}' --output json)
+      if [ "$(echo "$markers_json" | jq '.Objects | length')" -gt 0 ]; then
+        echo "$markers_json" > delete_markers.json
+        aws s3api delete-objects --bucket ${aws_s3_bucket.my_bucket.bucket} --delete file://delete_markers.json || true
+        rm -f delete_markers.json
       fi
-
-      rm -f delete_versions.json delete_markers.json
     EOT
   }
 
